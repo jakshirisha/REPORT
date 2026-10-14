@@ -1,73 +1,119 @@
 # How to run in VS Code
-# 1. In the terminal, type:  pip install numpy pandas matplotlib openpyxl
-# 2. Keep ref.xlsx in the same folder as this file.
-# 3. Click Run Python File (the triangle at the top right).
+# 1. Put this file and ref.xlsx in the same folder.
+# 2. Click Run Python File (the triangle at the top right).
 #
-# pandas reads the Excel file.
-# numpy holds the numbers and does the sums and divisions.
-# matplotlib draws the chart.
-# The two result files are saved on your Desktop.
+# This file does not load pandas. Python 3.14 on your PC freezes during
+# "import pandas", which is the KeyboardInterrupt you have been seeing.
+# The calculations are the same. The result files are saved beside this file.
 
+import csv
+import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
+EXCEL_EPOCH = datetime(1899, 12, 30)
+NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
 
-# Step 1. Read the Excel file.
+def read_sheet(path):
+    """Read the first sheet of an Excel file. Returns a list of rows."""
+    with zipfile.ZipFile(path) as workbook:
+        shared = []
+        if "xl/sharedStrings.xml" in workbook.namelist():
+            root = ET.fromstring(workbook.read("xl/sharedStrings.xml"))
+            for item in root.findall("m:si", NS):
+                shared.append("".join(node.text or "" for node in item.iter() if node.tag.endswith("}t")))
+        sheet = ET.fromstring(workbook.read("xl/worksheets/sheet1.xml"))
+
+    rows = []
+    for row in sheet.findall("m:sheetData/m:row", NS):
+        values = {}
+        for cell in row.findall("m:c", NS):
+            letters = "".join(ch for ch in (cell.get("r") or "A1") if ch.isalpha())
+            column = 0
+            for ch in letters:
+                column = column * 26 + (ord(ch.upper()) - 64)
+            value = cell.find("m:v", NS)
+            text = ""
+            if cell.get("t") == "s" and value is not None and value.text:
+                text = shared[int(value.text)]
+            elif value is not None and value.text:
+                text = value.text
+            values[column] = text
+        if values:
+            width = max(values)
+            rows.append([values.get(i, "") for i in range(1, width + 1)])
+    return rows
+
+
+def number(text):
+    text = text.strip()
+    if text == "":
+        return 0.0
+    return float(text)
+
+
+# Step 1. Read ref.xlsx from the same folder as this script.
 excel_file = Path(__file__).resolve().parent / "ref.xlsx"
-table = pd.read_excel(excel_file)
+sheet = read_sheet(excel_file)
+headers = [name.strip().lower() for name in sheet[0]]
+column = {name: index for index, name in enumerate(headers)}
 
-# The sheet has a few empty rows at the bottom. Drop them.
-table = table.dropna(subset=["OEE"])
+dates = []
+operating_hours = []
+breakdown_hours = []
+incidents = []
+oee = []
+
+for raw in sheet[1:]:
+    if column["oee"] >= len(raw) or raw[column["oee"]].strip() == "":
+        continue
+    serial = int(float(raw[column["date"]]))
+    dates.append(EXCEL_EPOCH + timedelta(days=serial))
+    operating_hours.append(number(raw[column["operating hours"]]))
+    breakdown_hours.append(number(raw[column["breakdown time"]]))
+    incidents.append(number(raw[column["no.of incidents=no.of failures"]]))
+    oee.append(number(raw[column["oee"]]))
 
 
-# Step 2. Copy the columns into numpy arrays.
-dates = table["Date"].to_numpy()
-operating_hours = table["operating hours"].to_numpy(dtype=float)
-breakdown_hours = table["breakdown time"].to_numpy(dtype=float)
-incidents = table["No.of incidents=No.of Failures"].to_numpy(dtype=float)
-oee = table["OEE"].to_numpy(dtype=float)
-
-
-# Step 3. Calculate one value for every day.
+# Step 2. Calculate one value for every day.
 # Breakdown frequency = incidents / operating hours
 # MTTR = breakdown hours / incidents
 # MTBF = operating hours / incidents
 # A day with 0 incidents has no MTTR and no MTBF.
 
-day_count = len(dates)
-breakdown_frequency = np.empty(day_count)
-mttr = np.empty(day_count)
-mtbf = np.empty(day_count)
+breakdown_frequency = []
+mttr = []
+mtbf = []
 
-for i in range(day_count):
-    breakdown_frequency[i] = incidents[i] / operating_hours[i]
-
+for i in range(len(dates)):
+    breakdown_frequency.append(incidents[i] / operating_hours[i])
     if incidents[i] == 0:
-        mttr[i] = np.nan
-        mtbf[i] = np.nan
+        mttr.append(None)
+        mtbf.append(None)
     else:
-        mttr[i] = breakdown_hours[i] / incidents[i]
-        mtbf[i] = operating_hours[i] / incidents[i]
+        mttr.append(breakdown_hours[i] / incidents[i])
+        mtbf.append(operating_hours[i] / incidents[i])
 
 
-# Step 4. Calculate the whole month from the totals.
-month_oee = np.mean(oee)
-month_breakdown_frequency = np.sum(incidents) / np.sum(operating_hours)
-month_mttr = np.sum(breakdown_hours) / np.sum(incidents)
-month_mtbf = np.sum(operating_hours) / np.sum(incidents)
+# Step 3. Calculate the whole month from the totals.
+month_oee = sum(oee) / len(oee)
+month_breakdown_frequency = sum(incidents) / sum(operating_hours)
+month_mttr = sum(breakdown_hours) / sum(incidents)
+month_mtbf = sum(operating_hours) / sum(incidents)
 
-print("OEE formula check: 80 x 90 x 95 =", round((80 / 100) * (90 / 100) * (95 / 100) * 100, 2))
-print()
 print("Date        OEE    Frequency    MTTR    MTBF")
-for i in range(day_count):
-    date_text = pd.Timestamp(dates[i]).strftime("%Y-%m-%d")
-    frequency_text = f"{breakdown_frequency[i]:.4f}"
-    mttr_text = "-" if np.isnan(mttr[i]) else f"{mttr[i]:.2f}"
-    mtbf_text = "-" if np.isnan(mtbf[i]) else f"{mtbf[i]:.2f}"
-    print(date_text, f"{oee[i]:.1f}", frequency_text, mttr_text, mtbf_text)
+for i in range(len(dates)):
+    mttr_text = "-" if mttr[i] is None else f"{mttr[i]:.2f}"
+    mtbf_text = "-" if mtbf[i] is None else f"{mtbf[i]:.2f}"
+    print(
+        dates[i].strftime("%Y-%m-%d"),
+        f"{oee[i]:.1f}",
+        f"{breakdown_frequency[i]:.4f}",
+        mttr_text,
+        mtbf_text,
+    )
 
 print()
 print("Month OEE                ", round(month_oee, 2))
@@ -76,66 +122,28 @@ print("Month MTTR               ", round(month_mttr, 2))
 print("Month MTBF               ", round(month_mtbf, 2))
 
 
-# Step 5. Save the numbers on the Desktop.
-desktop = Path.home() / "Desktop"
-if not desktop.is_dir():
-    desktop = Path.home() / "OneDrive" / "Desktop"
-desktop.mkdir(parents=True, exist_ok=True)
+# Step 4. Save the numbers next to this script (your Desktop).
+folder = Path(__file__).resolve().parent
+results_file = folder / "maintenance_results.csv"
+with results_file.open("w", newline="") as handle:
+    writer = csv.writer(handle)
+    writer.writerow(["Date", "operating hours", "breakdown time", "incidents", "OEE", "breakdown frequency", "MTTR", "MTBF"])
+    for i in range(len(dates)):
+        writer.writerow([
+            dates[i].strftime("%Y-%m-%d"),
+            operating_hours[i],
+            breakdown_hours[i],
+            incidents[i],
+            oee[i],
+            round(breakdown_frequency[i], 4),
+            "" if mttr[i] is None else round(mttr[i], 2),
+            "" if mtbf[i] is None else round(mtbf[i], 2),
+        ])
+    writer.writerow([])
+    writer.writerow(["Month OEE", round(month_oee, 2)])
+    writer.writerow(["Month breakdown frequency", round(month_breakdown_frequency, 4)])
+    writer.writerow(["Month MTTR", round(month_mttr, 2)])
+    writer.writerow(["Month MTBF", round(month_mtbf, 2)])
 
-daily_result = pd.DataFrame({
-    "Date": dates,
-    "operating hours": operating_hours,
-    "breakdown time": breakdown_hours,
-    "incidents": incidents,
-    "OEE": oee,
-    "breakdown frequency": breakdown_frequency,
-    "MTTR": mttr,
-    "MTBF": mtbf,
-})
-month_result = pd.DataFrame({
-    "OEE": [month_oee],
-    "breakdown frequency": [month_breakdown_frequency],
-    "MTTR": [month_mttr],
-    "MTBF": [month_mtbf],
-})
-
-results_file = desktop / "maintenance_results.xlsx"
-with pd.ExcelWriter(results_file) as writer:
-    daily_result.to_excel(writer, sheet_name="Daily", index=False)
-    month_result.to_excel(writer, sheet_name="Month", index=False)
-
-
-# Step 6. Draw the chart and save it on the Desktop.
-plt.figure(figsize=(9, 8))
-
-plt.subplot(3, 1, 1)
-plt.plot(dates, oee, marker="o", label="OEE")
-plt.axhline(82, linestyle="--", label="Target 82%")
-plt.ylabel("OEE (%)")
-plt.title("OEE")
-plt.legend()
-
-plt.subplot(3, 1, 2)
-plt.bar(dates, breakdown_frequency)
-plt.ylabel("Breakdowns per hour")
-plt.title("Breakdown frequency")
-
-plt.subplot(3, 1, 3)
-plt.plot(dates, mttr, marker="o", label="MTTR")
-plt.plot(dates, mtbf, marker="o", label="MTBF")
-plt.ylabel("Hours")
-plt.xlabel("Date")
-plt.title("MTTR and MTBF")
-plt.legend()
-
-for picture in plt.gcf().axes:
-    for label in picture.get_xticklabels():
-        label.set_rotation(45)
-
-plt.tight_layout()
-chart_file = desktop / "maintenance_chart.png"
-plt.savefig(chart_file)
 print()
 print("Saved", results_file)
-print("Saved", chart_file)
-plt.show()
