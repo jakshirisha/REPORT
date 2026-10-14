@@ -1,19 +1,35 @@
 #!/usr/bin/env python3
 """Calculate OEE, breakdown frequency, MTTR and MTBF.
 
+Run this file in VS Code:
+
+1. Install Python from https://www.python.org if it is not already installed.
+2. In VS Code, install the Microsoft extension named Python.
+3. Use File, Open Folder, and open the folder that contains this file and ref.xlsx.
+4. Open calculate_metrics.py.
+5. Click Run Python File. That is the triangle at the top right of the editor.
+   You can also press F5 and choose "Run maintenance metrics".
+
+The results appear in the Terminal panel at the bottom.
+
 OEE                    = availability x performance x quality
 Breakdown frequency    = number of breakdowns / operating hours
 MTTR                   = breakdown hours / number of incidents
 MTBF                   = operating hours / number of failures
 
-Inputs are ordinary numbers. Percentages are on a 0–100 scale, so 82 means 82%.
+Percentages are on a 0–100 scale, so 82 means 82%.
 """
 
 from __future__ import annotations
 
 import sys
+import zipfile
+from datetime import datetime, timedelta
+from pathlib import Path
+from xml.etree import ElementTree as ET
 
-from calculate_kpis import load_daily_rows
+EXCEL_EPOCH = datetime(1899, 12, 30)
+SHEET_NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
 
 def oee(availability, performance, quality):
@@ -42,10 +58,6 @@ def mtbf(operating_hours, number_of_failures):
     return operating_hours / number_of_failures
 
 
-def _num(value):
-    return None if value is None else float(value)
-
-
 def calculate_sheet(path):
     """Daily and monthly figures from the workbook.
 
@@ -54,17 +66,15 @@ def calculate_sheet(path):
     when availability, performance and quality are all known.
     """
     daily = []
-    for row in load_daily_rows(path):
-        incidents = _num(row.incidents)
-        hours = _num(row.operating_hours)
-        breakdown_hours = _num(row.breakdown_hours)
+    for row in _load_rows(path):
+        incidents = row["incidents"]
+        hours = row["operating_hours"]
+        breakdown_hours = row["breakdown_hours"]
         daily.append(
             {
-                "date": None if row.date is None else row.date.date().isoformat(),
-                "oee": _num(row.oee),
-                "breakdown_frequency": (
-                    breakdown_frequency(incidents, hours) if hours else None
-                ),
+                "date": row["date"],
+                "oee": row["oee"],
+                "breakdown_frequency": breakdown_frequency(incidents, hours) if hours else None,
                 "mttr": mttr(breakdown_hours, incidents) if incidents else None,
                 "mtbf": mtbf(hours, incidents) if incidents else None,
                 "operating_hours": hours,
@@ -88,6 +98,104 @@ def calculate_sheet(path):
         "breakdown_hours": breakdown,
     }
     return daily, month
+
+
+def _load_rows(path):
+    table = _read_xlsx(Path(path))
+    if not table:
+        raise ValueError(f"{path} has no rows")
+    headers = [_header(cell) for cell in table[0]]
+    columns = {}
+    for index, header in enumerate(headers):
+        if header in {"date", "operating_hours", "breakdown_hours", "incidents", "oee"}:
+            columns.setdefault(header, index)
+    missing = [name for name in ("operating_hours", "breakdown_hours", "incidents") if name not in columns]
+    if missing:
+        raise ValueError(f"{path} is missing columns: {', '.join(missing)}")
+
+    rows = []
+    for raw in table[1:]:
+        if not any(cell.strip() for cell in raw):
+            continue
+        rows.append(
+            {
+                "date": _date(raw, columns.get("date")),
+                "operating_hours": _number(raw, columns.get("operating_hours")) or 0,
+                "breakdown_hours": _number(raw, columns.get("breakdown_hours")) or 0,
+                "incidents": _number(raw, columns.get("incidents")) or 0,
+                "oee": _number(raw, columns.get("oee")),
+            }
+        )
+    if not rows:
+        raise ValueError(f"{path} has headers but no daily rows")
+    return rows
+
+
+def _read_xlsx(path):
+    with zipfile.ZipFile(path) as workbook:
+        shared = []
+        if "xl/sharedStrings.xml" in workbook.namelist():
+            root = ET.fromstring(workbook.read("xl/sharedStrings.xml"))
+            for item in root.findall("m:si", SHEET_NS):
+                shared.append(
+                    "".join(
+                        node.text or ""
+                        for node in item.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
+                    )
+                )
+        sheet = ET.fromstring(workbook.read("xl/worksheets/sheet1.xml"))
+
+    rows = []
+    for row in sheet.findall("m:sheetData/m:row", SHEET_NS):
+        values = {}
+        for cell in row.findall("m:c", SHEET_NS):
+            ref = cell.get("r") or "A1"
+            letters = "".join(char for char in ref if char.isalpha())
+            column = 0
+            for char in letters:
+                column = column * 26 + (ord(char.upper()) - 64)
+            kind = cell.get("t")
+            value = cell.find("m:v", SHEET_NS)
+            text = ""
+            if kind == "s" and value is not None and value.text:
+                text = shared[int(value.text)]
+            elif value is not None and value.text:
+                text = value.text
+            values[column] = text
+        if not values:
+            rows.append([])
+            continue
+        width = max(values)
+        rows.append([values.get(index, "") for index in range(1, width + 1)])
+    return rows
+
+
+def _header(label):
+    compact = "".join(char for char in label.lower() if char.isalnum())
+    return {
+        "date": "date",
+        "operatinghours": "operating_hours",
+        "breakdowntime": "breakdown_hours",
+        "noofincidentsnooffailures": "incidents",
+        "noofincidents": "incidents",
+        "incidents": "incidents",
+        "oee": "oee",
+    }.get(compact, compact)
+
+
+def _number(raw, index):
+    if index is None or index >= len(raw) or not raw[index].strip():
+        return None
+    return float(raw[index])
+
+
+def _date(raw, index):
+    if index is None or index >= len(raw) or not raw[index].strip():
+        return None
+    text = raw[index].strip()
+    if text.isdigit():
+        return (EXCEL_EPOCH + timedelta(days=int(text))).date().isoformat()
+    return text
 
 
 def _report(path, daily, month):
@@ -130,9 +238,19 @@ def _fmt(value, places):
     return f"{value:.{places}f}"
 
 
+def workbook_path(argument=None):
+    """Find ref.xlsx beside this script, which is where VS Code's Run button looks."""
+    if argument:
+        return argument
+    beside_script = Path(__file__).resolve().parent / "ref.xlsx"
+    if beside_script.exists():
+        return str(beside_script)
+    return "ref.xlsx"
+
+
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
-    path = arguments[0] if arguments else "ref.xlsx"
+    path = workbook_path(arguments[0] if arguments else None)
     daily, month = calculate_sheet(path)
     print(_report(path, daily, month))
     return 0
