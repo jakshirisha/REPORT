@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
+from calculate_metrics import breakdown_frequency, calculate_sheet, mtbf, mttr, oee
 from calculate_kpis import (
     DailyRecord,
     Gates,
@@ -169,6 +170,22 @@ class SeptemberSheet(unittest.TestCase):
         )
         self.assertEqual(engineer.opportunity, Decimal(324))
         self.assertEqual(engineer.paid, Decimal("242.35"))
+
+
+class FourMetrics(unittest.TestCase):
+    def test_formulas(self):
+        self.assertAlmostEqual(oee(80, 90, 95), 68.4)
+        self.assertAlmostEqual(breakdown_frequency(2, 25), 0.08)
+        self.assertAlmostEqual(mttr(5, 2), 2.5)
+        self.assertAlmostEqual(mtbf(25, 2), 12.5)
+
+    def test_september_totals(self):
+        _daily, month = calculate_sheet(ROOT / "ref.xlsx")
+        self.assertAlmostEqual(month["oee"], 1676.9 / 19)
+        self.assertAlmostEqual(month["breakdown_frequency"], 37 / 686)
+        self.assertEqual(month["breakdowns"], 37)
+        self.assertAlmostEqual(month["mttr"], 67 / 37)
+        self.assertAlmostEqual(month["mtbf"], 686 / 37)
 
 
 if __name__ == "__main__":
